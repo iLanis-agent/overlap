@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Overlap - find the meeting time that ruins nobody's evening</title>
+<style>
+  :root { --bg:#101418; --panel:#171e26; --line:#2a3440; --text:#eef3f8; --dim:#93a1b0; --accent:#8fd3ff; --work:#3d6d96; --overlap:#8be0a4; --off:#1a222c; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--text); font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; min-height:100vh; display:flex; flex-direction:column; align-items:center; padding:26px 14px 44px; }
+  h1 { font-size:30px; }
+  .sub { color:var(--dim); margin:6px 0 18px; font-size:14px; text-align:center; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:16px 18px; width:min(680px, 94vw); margin-bottom:14px; }
+  .card h2 { font-size:15px; margin-bottom:10px; }
+  .grid4 { display:grid; grid-template-columns:1.4fr 1.6fr .8fr .8fr auto; gap:8px; align-items:end; }
+  input, select { background:#0c1015; border:1px solid var(--line); border-radius:8px; color:var(--text); padding:8px 10px; font-size:13px; width:100%; }
+  label { color:var(--dim); font-size:11px; display:block; margin-bottom:4px; }
+  button { background:var(--accent); color:#101418; border:none; border-radius:8px; padding:9px 14px; font-size:13px; font-weight:700; cursor:pointer; }
+  .tzrow { display:grid; grid-template-columns:70px 1fr; gap:10px; align-items:center; margin-top:8px; font-size:13px; }
+  .tzrow .who { display:flex; justify-content:space-between; align-items:center; }
+  .tzrow .rm { color:var(--dim); cursor:pointer; font-size:11px; }
+  .tzrow .rm:hover { color:#ff8f7a; }
+  .band { display:grid; grid-template-columns:repeat(96, 1fr); height:22px; border-radius:5px; overflow:hidden; background:var(--off); }
+  .band div { height:100%; }
+  .b-work { background:var(--work); }
+  .b-over { background:var(--overlap); }
+  .hours { display:grid; grid-template-columns:repeat(25, 1fr); font-size:9px; color:var(--dim); margin:2px 0 4px 0; }
+  .hours span { text-align:left; }
+  .utc-label { text-align:right; font-size:11px; color:var(--dim); }
+  #summary { text-align:center; font-size:16px; line-height:1.7; }
+  #summary .big { font-size:24px; font-weight:900; color:var(--overlap); }
+  #summary .none { color:#ff8f7a; font-weight:700; }
+  .slot { background:#0c1015; border:1px solid var(--overlap); border-radius:10px; padding:10px 14px; margin-top:8px; font-size:14px; line-height:1.7; }
+  .slot .t { font-weight:900; color:var(--overlap); }
+  .slot .locs { color:var(--dim); font-size:13px; }
+  .empty { color:var(--dim); text-align:center; padding:10px 0; font-size:14px; }
+  .foot { margin-top:14px; color:var(--dim); font-size:13px; }
+  a { color:var(--accent); text-decoration:none; }
+</style>
+</head>
+<body>
+<h1>Overlap</h1>
+<div class="sub">your team spans six time zones and the meeting keeps landing in someone's midnight. fix that.</div>
+
+<div class="card">
+  <h2>Add a teammate</h2>
+  <div class="grid4">
+    <div><label>Name</label><input id="t-name" placeholder="e.g. Priya"></div>
+    <div><label>Time zone</label><select id="t-zone"></select></div>
+    <div><label>Works from</label><select id="t-start"></select></div>
+    <div><label>Until</label><select id="t-end"></select></div>
+    <button id="add">Add</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>The day, side by side <span class="utc-label">grid = UTC</span></h2>
+  <div class="hours" id="hours"></div>
+  <div id="bands"><div class="empty">Add at least two teammates.</div></div>
+</div>
+
+<div class="card">
+  <h2>Best meeting times
+    <select id="dur" style="width:auto;display:inline-block;margin-left:8px">
+      <option value="15">15 min</option>
+      <option value="30" selected>30 min</option>
+      <option value="60">60 min</option>
+    </select>
+  </h2>
+  <div id="summary"></div>
+  <div id="slots"></div>
+</div>
+
+<div class="foot"><a href="index.html">&larr; about</a></div>
+
+<script src="engine.js?v=1"></script>
+<script>
+(function () {
+  var KEY = 'overlap-v1';
+  var state = { people: [] }; // {id, name, zone, start, end}
+
+  var ZONES = [
+    'Pacific/Auckland','Australia/Sydney','Australia/Perth','Asia/Tokyo','Asia/Seoul',
+    'Asia/Shanghai','Asia/Singapore','Asia/Hong_Kong','Asia/Jakarta','Asia/Bangkok',
+    'Asia/Kolkata','Asia/Dubai','Asia/Jerusalem','Europe/Moscow','Europe/Istanbul',
+    'Europe/Berlin','Europe/Paris','Europe/London','Atlantic/Azores','America/Sao_Paulo',
+    'America/New_York','America/Chicago','America/Denver','America/Los_Angeles',
+    'America/Anchorage','Pacific/Honolulu'
+  ];
+
+  function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} }
+  function load() { try { var s = JSON.parse(localStorage.getItem(KEY)); if (s && Array.isArray(s.people)) state = s; } catch (e) {} }
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
+
+  // current offset (minutes east of UTC) for an IANA zone, via Intl
+  function offsetMinutes(tz) {
+    var now = new Date();
+    var parts = new Intl.DateTimeFormat('en-US', { timeZone: tz, hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }).formatToParts(now);
+    var p = {};
+    parts.forEach(function (x) { p[x.type] = x.value; });
+    var asUTC = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour % 24, +p.minute, +p.second);
+    return Math.round((asUTC - now.getTime()) / 60000);
+  }
+
+  var zoneSel = document.getElementById('t-zone');
+  ZONES.forEach(function (z) {
+    var o = document.createElement('option');
+    o.value = z;
+    o.textContent = z.replace(/_/g, ' ').replace('/', ' / ');
+    zoneSel.appendChild(o);
+  });
+  ['t-start', 't-end'].forEach(function (id, idx) {
+    var sel = document.getElementById(id);
+    for (var h = 0; h <= 24; h++) {
+      var o = document.createElement('option');
+      o.value = h;
+      o.textContent = String(h).padStart(2, '0') + ':00';
+      if ((idx === 0 && h === 9) || (idx === 1 && h === 17)) o.selected = true;
+      sel.appendChild(o);
+    }
+  });
+  zoneSel.value = 'Asia/Jerusalem';
+
+  var hoursEl = document.getElementById('hours');
+  for (var h2 = 0; h2 <= 24; h2++) {
+    var sp = document.createElement('span');
+    sp.textContent = h2 % 3 === 0 ? String(h2).padStart(2, '0') : '';
+    hoursEl.appendChild(sp);
+  }
+
+  function resolved() {
+    return state.people.map(function (p) {
+      return { name: p.name, zone: p.zone, start: p.start, end: p.end, offset: offsetMinutes(p.zone) };
+    });
+  }
+
+  function inWindows(windows, minute) {
+    return windows.some(function (w) { return minute >= w.start && minute < w.end; });
+  }
+
+  function render() {
+    var bands = document.getElementById('bands');
+    var slots = document.getElementById('slots');
+    var summary = document.getElementById('summary');
+    if (state.people.length < 2) {
+      bands.innerHTML = '<div class="empty">Add at least two teammates.</div>';
+      summary.innerHTML = '';
+      slots.innerHTML = '';
+      return;
+    }
+    var people = resolved();
+    var overlap = Overlap.overlapAll(people);
+    bands.innerHTML = '';
+    people.forEach(function (p) {
+      var win = Overlap.workWindowUTC(p.offset, p.start, p.end);
+      var row = document.createElement('div');
+      row.className = 'tzrow';
+      var who = '<div class="who"><span><b>' + esc(p.name) + '</b> <span style="color:var(--dim)">' + esc(p.zone.split('/')[1].replace(/_/g, ' ')) + ' ' + String(p.start).padStart(2, '0') + '-' + String(p.end).padStart(2, '0') + '</span></span><span class="rm" data-id="' + p.name + '">remove</span></div>';
+      var band = '<div class="band">';
+      for (var q = 0; q < 96; q++) {
+        var m = q * 15;
+        var cls = inWindows(overlap, m) ? 'b-over' : (inWindows(win, m) ? 'b-work' : '');
+        band += '<div' + (cls ? ' class="' + cls + '"' : '') + '></div>';
+      }
+      band += '</div>';
+      row.innerHTML = who + band;
+      bands.appendChild(row);
+    });
+    bands.querySelectorAll('.rm').forEach(function (x) {
+      x.addEventListener('click', function () {
+        state.people = state.people.filter(function (p) { return p.name !== x.getAttribute('data-id'); });
+        save(); render();
+      });
+    });
+
+    var total = Overlap.totalMinutes(overlap);
+    var dur = +document.getElementById('dur').value;
+    var sug = Overlap.suggest(overlap, dur);
+    if (!total) {
+      summary.innerHTML = '<span class="none">Zero shared working hours.</span><br><span style="color:var(--dim);font-size:13px">Someone has to flex their day - widen a work window and watch the green appear.</span>';
+      slots.innerHTML = '';
+      return;
+    }
+    summary.innerHTML = '<div class="big">' + (total >= 60 ? (total / 60) + 'h' : total + 'min') + ' of shared time</div>';
+    slots.innerHTML = '';
+    sug.slice(0, 3).forEach(function (s) {
+      var d = document.createElement('div');
+      d.className = 'slot';
+      var locs = people.map(function (p) {
+        return esc(p.name) + ' ' + Overlap.localTime(s.start, p.offset) + '-' + Overlap.localTime(s.end, p.offset);
+      }).join(' &middot; ');
+      d.innerHTML = '<span class="t">' + Overlap.utcTime(s.start) + '-' + Overlap.utcTime(s.end) + ' UTC</span><br><span class="locs">' + locs + '</span>';
+      slots.appendChild(d);
+    });
+  }
+
+  document.getElementById('add').addEventListener('click', function () {
+    var name = document.getElementById('t-name').value.trim();
+    var start = +document.getElementById('t-start').value;
+    var end = +document.getElementById('t-end').value;
+    if (!name || start >= end) return;
+    if (state.people.some(function (p) { return p.name === name; })) return;
+    state.people.push({ id: 'p' + Date.now(), name: name, zone: zoneSel.value, start: start, end: end });
+    document.getElementById('t-name').value = '';
+    save(); render();
+  });
+  document.getElementById('dur').addEventListener('change', render);
+
+  // test hook
+  window.__ov = {
+    clear: function () { state = { people: [] }; save(); render(); },
+    add: function (name, zone, start, end) {
+      state.people.push({ id: 'p' + Math.random(), name: name, zone: zone, start: start, end: end });
+      save(); render();
+    },
+    offset: offsetMinutes,
+    read: function () {
+      return {
+        summary: document.getElementById('summary').textContent,
+        slots: Array.prototype.map.call(document.querySelectorAll('#slots .slot'), function (d) { return d.textContent; }),
+        bands: document.querySelectorAll('#bands .tzrow').length,
+        greenPerBand: Array.prototype.map.call(document.querySelectorAll('#bands .band'), function (b) { return b.querySelectorAll('.b-over').length; })
+      };
+    }
+  };
+
+  load();
+  render();
+})();
+</script>
+</body>
+</html>
